@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  unshackle:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+      - "8888:8888"
+    environment:
+      - TMDB_API_KEY=${TMDB_API_KEY}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - yourpath/Downloads:/app/downloads
+      - yourpath/unshackle/temp:/app/temp
+      - yourpath/unshackle/cookies:/app/unshackle/cookies
+      - yourpath/unshackle/cache:/app/unshackle/cache
+      - yourpath/unshackle/WVDs:/app/unshackle/WVDs
+      - yourpath/unshackle/PRDs:/app/unshackle/PRDs
+      - yourpath/unshackle/unshackle.yaml:/app/unshackle/unshackle.yaml
+      - yourpath/unshackle/services:/app/unshackle/services
+    devices:
+      - "/dev/dri:/dev/dri"
+    group_add:
+      - "video"

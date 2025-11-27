@@ -1,25 +1,84 @@
+# Unshackle Docker Compose Configuration
+#
+# Equivalent docker run command:
+# DOCKER_BUILDKIT=1 docker run -d --name unshackle \
+#   --restart unless-stopped \
+#   -p 8080:80 -p 8888:8888 \
+#   -e TMDB_API_KEY=your_key_here \
+#   -v ./downloads:/app/downloads \
+#   -v ./unshackle/temp:/app/temp \
+#   -v ./unshackle/cookies:/app/unshackle/cookies \
+#   -v ./unshackle/cache:/app/unshackle/cache \
+#   -v ./unshackle/WVDs:/app/unshackle/WVDs \
+#   -v ./unshackle/PRDs:/app/unshackle/PRDs \
+#   -v ./unshackle.yaml:/app/unshackle/unshackle.yaml \
+#   -v ./unshackle/services:/app/unshackle/services \
+#   unshackle:latest
+#
+# For GPU support on native Linux (Intel VA-API):
+#   --device /dev/dri --group-add video
+#
+# For GPU support on native Linux (NVIDIA):
+#   --gpus all
+#
+
 version: '3.8'
 
 services:
   unshackle:
-    build: .
+    image: unshackle:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Space-separated list: intel, nvidia, amd
+        # Default: "intel" (safe for all systems, harmless if no GPU)
+        GPUSUPPORT: "intel"
+        # For multi-GPU support: "intel nvidia" or "intel nvidia amd"
+        # Optional: customize source repositories
+        # UNSHACKLE_SOURCE: https://github.com/unshackle-dl/unshackle
+        # UNSHACKLE_BRANCH: main
+        # UI_SOURCE: https://github.com/Kryxan/unshackle-ui
+        # UI_BRANCH: main
+    container_name: unshackle
     restart: unless-stopped
     ports:
-      - "8080:80"
-      - "8888:8888"
+      - "8080:80"    # Web UI
+      - "8888:8888"  # REST API
     environment:
-      - TMDB_API_KEY=${TMDB_API_KEY}
-      - PYTHONUNBUFFERED=1
+      # Optional: TMDB API key for UI metadata fetching
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
     volumes:
-      - yourpath/Downloads:/app/downloads
-      - yourpath/unshackle/temp:/app/temp
-      - yourpath/unshackle/cookies:/app/unshackle/cookies
-      - yourpath/unshackle/cache:/app/unshackle/cache
-      - yourpath/unshackle/WVDs:/app/unshackle/WVDs
-      - yourpath/unshackle/PRDs:/app/unshackle/PRDs
-      - yourpath/unshackle/unshackle.yaml:/app/unshackle/unshackle.yaml
-      - yourpath/unshackle/services:/app/unshackle/services
-    devices:
-      - "/dev/dri:/dev/dri"
-    group_add:
-      - "video"
+      # Adjust paths as needed
+      - ./downloads:/app/downloads
+      - ./unshackle/temp:/app/temp
+      - ./unshackle/cookies:/app/unshackle/cookies
+      - ./unshackle/cache:/app/unshackle/cache
+      - ./unshackle/WVDs:/app/unshackle/WVDs
+      - ./unshackle/PRDs:/app/unshackle/PRDs
+      - ./unshackle.yaml:/app/unshackle/unshackle.yaml
+      - ./unshackle/services:/app/unshackle/services
+    
+    # GPU Support (Linux only - comment out on Windows/WSL2)
+    # For Intel VA-API hardware acceleration:
+    # devices:
+    #   - "/dev/dri:/dev/dri"
+    # group_add:
+    #   - "video"
+    
+    # For NVIDIA GPU support, use Docker Compose 1.28.0+ with deploy.resources:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    
+    # Healthcheck (optional)
+    healthcheck:
+      test: ["CMD", "/etc/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -1,4 +1,7 @@
-# docker-unshackle
+# syntax=docker/dockerfile:1.4
+# Unshackle-Docker
+# https://github.com/Kryxan/Unshackle-docker
+#
 # This repository contains a standalone copy of the `Dockerfile` used to
 # build an Unshackle image with the Unshackle UI. The Unshackle UI is
 # currently in development and does not work in it's current state. I
@@ -22,352 +25,370 @@
 # Configuration variables
 # Build the main unshackle CLI application using Debian slim-trixie
 
+# syntax for BuildKit features (cache mounts)
+# requires Docker BuildKit; e.g. `DOCKER_BUILDKIT=1 docker build .`
 FROM python:slim-trixie
 
 # declare ARG variables after FROM
 ARG UNSHACKLE_BRANCH=main
 ARG UNSHACKLE_SOURCE=https://github.com/unshackle-dl/unshackle
+
 ARG UI_BRANCH=main
 # unshackle UI is currently broken
-#ARG UI_SOURCE=https://github.com/unshackle-dl/unshackle-ui
+# ARG UI_SOURCE=https://github.com/unshackle-dl/unshackle-ui
 # Use a modified UI source that more or less works with the current unshackle backend
 ARG UI_SOURCE=https://github.com/Kryxan/unshackle-ui
 
-# Set environment variables to reduce image size
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    UV_CACHE_DIR=/tmp/uv-cache
+# GPU driver repositories (multi-GPU + WSL2 aware)
+# "intel nvidia amd" or "intel nvidia" or "intel" or "" (none)
+# Default "intel" is safe for all systems (harmless if no Intel GPU present)
+ARG GPUSUPPORT="intel"
 
 # Add container metadata
 LABEL org.opencontainers.image.description="Docker image for Unshackle CLI and Web UI with all required dependencies"
 LABEL org.opencontainers.image.source="${UNSHACKLE_SOURCE}"
 LABEL unshackle.branch="${UNSHACKLE_BRANCH}"
 
-# Install base dependencies (Debian packages) including Node.js
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        nano \
-        iputils-ping \
-        wget \
-        gnupg \
-        git \
-        curl \
-        build-essential \
-        cmake \
-        pkg-config \
-        bash \
-        nginx \
-        supervisor \
-        grc \
-        nodejs \
-        npm \
-        openssl \
+WORKDIR /tmp
+
+# Environment variables
+ENV UV_CACHE_DIR=/app/cache/uv \
+    NODE_ENV=production
+
+# Ensure /opt/bin is on PATH so installed tools are found by scripts
+ENV PATH=/opt/bin:$PATH
+
+# FFmpeg hardware acceleration defaults
+# VAAPI: Intel/AMD GPU acceleration (safe fallback, auto-detects if unavailable)
+ENV LIBVA_DRIVER_NAME=iHD \
+    LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
+
+# Create directories just to be sure they exist
+RUN mkdir -p /app/binaries /opt/bin || true;
+
+# Install minimal tools required to add external apt repositories (curl/gpg)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl gnupg dirmngr ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install media processing dependencies (Debian packages)
-# Ensure existing apt source lines include contrib/non-free components
-# (avoid adding duplicate 'deb' entries which trigger warnings).
-# Enable non-free repos for drivers that live in non-free (intel-media drivers etc.)
-#RUN echo "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware" > /etc/apt/sources.list.d/nonfree.list \
-# && echo "deb http://deb.debian.org/debian-security trixie-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list.d/nonfree.list \
-# && echo "deb http://deb.debian.org/debian trixie-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list.d/nonfree.list
+
+# Ensure existing debian.sources components lines include contrib/non-free components
 RUN set -eux; \
+    # Ensure apt list files include contrib/non-free components where appropriate
     for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.{list,sources}; do \
         [ -f "$f" ] || continue; \
         case "$f" in \
             *.sources) \
-                # For .sources files, append components on the 'Components:' line if missing
-                if ! grep -qEi '^Components:.*\bcontrib\b' "$f"; then \
+                if ! grep -qEi '^Components:.*\\bcontrib\\b' "$f"; then \
                     sed -ri 's/^(Components:[[:space:]]*)(.*main.*)$/\1\2 contrib non-free non-free-firmware/' "$f" || true; \
                 fi; \
                 ;; \
             *) \
-                # For legacy .list files, append components to 'deb' lines when missing
                 awk '/^deb/ && /debian/ && $0 !~ /contrib/ {print $0 " contrib non-free non-free-firmware"; next} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f" || true; \
                 ;; \
         esac; \
     done
+# Add GPU driver repositories based on selected GPUSUPPORT build ARG
+RUN set -eux; \
+    if grep -qi microsoft /proc/version; then \
+        echo "WSL2 detected: skipping kernel driver repos, only user-space libs will be installed later"; \
+    else \
+        for gpu in $GPUSUPPORT; do \
+            case "$gpu" in \
+                nvidia) echo "Adding NVIDIA CUDA repository..."; \
+                    curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/3bf863cc.pub \
+                        | gpg --dearmor -o /usr/share/keyrings/nvidia.gpg; \
+                    printf "Types: deb\nURIs: https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/\nSuites: /\nComponents: \nArchitectures: amd64\nSigned-By: /usr/share/keyrings/nvidia.gpg\n" \
+                        > /etc/apt/sources.list.d/nvidia-cuda.sources ;; \
+                amd) echo "Adding AMD ROCm repository..."; \
+                    curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key \
+                        | gpg --dearmor -o /usr/share/keyrings/rocm.gpg; \
+                    printf "Types: deb\nURIs: https://repo.radeon.com/rocm/apt/debian/\nSuites: jammy\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/rocm.gpg\n" \
+                        > /etc/apt/sources.list.d/rocm.sources ;; \
+                *) echo "Unknown GPU type: $gpu" ;; \
+            esac; \
+        done; \
+    fi
 
 
+# Add Jellyfin repository for jellyfin-ffmpeg7 package
+RUN curl -fsSL https://repo.jellyfin.org/debian/jellyfin_team.gpg.key \
+        | gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg; \
+    printf "Types: deb\nURIs: https://repo.jellyfin.org/debian\nSuites: trixie\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/jellyfin.gpg\n" \
+        > /etc/apt/sources.list.d/jellyfin.sources
 
+# Add Caddy repository (needed before apt install) and other third-party keys
+RUN set -eux; \
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg || true; \
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list || true
 
-    
-# NOTE: The following VA-API / userspace driver packages are targeted for
-# Intel integrated GPUs to improve ffmpeg hardware acceleration. If you need
-# NVIDIA or AMD GPU support, uncomment/add the appropriate packages below
-# instead (NVIDIA typically requires the proprietary driver + nvidia-container-toolkit,
-# AMD may need mesa packages or ROCm components):
-# # NVIDIA (example placeholder):
-# # && apt-get install -y --no-install-recommends nvidia-driver nvidia-container-toolkit \
-# # AMD (example placeholder):
-# # && apt-get install -y --no-install-recommends mesa-vulkan-drivers rocminfo \
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ffmpeg \
-        aria2 \
-        mediainfo \
-        mkvtoolnix \
-        # VA-API / userspace driver libs and tools (Intel integrated GPU)
-        libva2 \
-        libva-drm2 \
-        libva-x11-2 \
-        libdrm2 \
-        vainfo \
-        intel-media-va-driver-non-free \
-        i965-va-driver-shaders \
-        mesa-va-drivers \
-    && rm -rf /var/lib/apt/lists/*
+# Consolidated apt install with BuildKit cache mounts for faster iterative builds
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
+    apt-get update && apt-get upgrade -y; \
+    apt-get install -y --no-install-recommends \
+        nano iputils-ping wget git build-essential cmake pkg-config \
+        bash supervisor grc nodejs npm unzip fastfetch jq \
+        jellyfin-ffmpeg7 aria2 mediainfo mkvtoolnix mpv nginx openssl caddy
 
-# Install shaka packager
-RUN wget https://github.com/shaka-project/shaka-packager/releases/download/v2.6.1/packager-linux-x64 \
-    && chmod +x packager-linux-x64 \
-    && mv packager-linux-x64 /usr/local/bin/packager
+# Bento4 (mp4decrypt) - download official zip, map bin/ to /opt/bin/, keep rest under /opt/bento4/
+RUN set -eux; \
+    MP4_URL="https://www.bok.net/Bento4/binaries/Bento4-SDK-1-6-0-641.x86_64-unknown-linux.zip"; \
+    echo "Downloading Bento4 from $MP4_URL"; \
+    wget -qO /tmp/bento4.zip "$MP4_URL" || true; \
+    mkdir -p /tmp/bento4 && unzip -q /tmp/bento4.zip -d /tmp/bento4 || true; \
+    BENTO_DIR=/tmp/bento4/Bento4-SDK-1-6-0-641.x86_64-unknown-linux; \
+    if [ -d "$BENTO_DIR" ]; then \
+        mkdir -p /opt/bento4; \
+        mv "$BENTO_DIR/bin"/* /opt/bin/ 2>/dev/null || true; \
+        mv "$BENTO_DIR/utils"/* /opt/bin/ 2>/dev/null || true; \
+        mv "$BENTO_DIR"/* /opt/bento4/ 2>/dev/null || true; \
+    fi; \
+    rm -rf /tmp/bento4 /tmp/bento4.zip || true;
 
-# Install N_m3u8DL-RE
-RUN wget https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.3.0-beta/N_m3u8DL-RE_v0.3.0-beta_linux-x64_20241203.tar.gz \
-    && tar -xzf N_m3u8DL-RE_v0.3.0-beta_linux-x64_20241203.tar.gz \
-    && mv N_m3u8DL-RE /usr/local/bin/ \
-    && chmod +x /usr/local/bin/N_m3u8DL-RE \
-    && rm N_m3u8DL-RE_v0.3.0-beta_linux-x64_20241203.tar.gz
+# dovi_tool
+RUN set -eux; \
+    DOVI_URL=$(curl -s https://api.github.com/repos/quietvoid/dovi_tool/releases/latest \
+        | jq -r '.assets[] | select(.browser_download_url | test("x86_64-unknown-linux")) | .browser_download_url' \
+        | head -n1); \
+    echo "DOVI URL: $DOVI_URL"; \
+    if [ -n "$DOVI_URL" ]; then \
+        wget -qO /tmp/dovi.tgz "$DOVI_URL" && \
+        mkdir -p /tmp/dovi && \
+        tar -xzf /tmp/dovi.tgz -C /tmp/dovi; \
+        find /tmp/dovi -type f -perm /111 -exec cp -v {} /opt/bin/ \;; \
+        rm -f /tmp/dovi.tgz; \
+    fi;
 
-# Create binaries directory and add symlinks
-RUN mkdir -p /app/binaries && \
-    ln -sf /usr/bin/ffprobe /app/binaries/ffprobe && \
-    ln -sf /usr/bin/ffmpeg /app/binaries/ffmpeg && \
-    ln -sf /usr/bin/mkvmerge /app/binaries/mkvmerge && \
-    ln -sf /usr/local/bin/N_m3u8DL-RE /app/binaries/N_m3u8DL-RE && \
-    ln -sf /usr/local/bin/packager /app/binaries/packager && \
-    ln -sf /usr/local/bin/packager /usr/local/bin/shaka-packager && \
-    ln -sf /usr/local/bin/packager /usr/local/bin/packager-linux-x64
+# hdr10plus_tool
+RUN set -eux; \
+    HDR10P_URL=$(curl -s https://api.github.com/repos/quietvoid/hdr10plus_tool/releases/latest \
+        | jq -r '.assets[] | select(.browser_download_url | test("x86_64-unknown-linux")) | .browser_download_url' \
+        | head -n1); \
+    echo "HDR10P URL: $HDR10P_URL"; \
+    if [ -n "$HDR10P_URL" ]; then \
+        wget -qO /tmp/hdr10p.tgz "$HDR10P_URL" && \
+        mkdir -p /tmp/hdr10p && \
+        tar -xzf /tmp/hdr10p.tgz -C /tmp/hdr10p; \
+        find /tmp/hdr10p -type f -perm /111 -exec cp -v {} /opt/bin/ \;; \
+        rm -f /tmp/hdr10p.tgz; \
+    fi;
 
-# nginx and supervisor were already installed above with base dependencies
+# N_m3u8DL-RE
+RUN set -eux; \
+    N3_URL=$(curl -s https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases/latest \
+        | jq -r '.assets[] | select(.browser_download_url | test("linux-musl-x64")) | .browser_download_url' \
+        | head -n1); \
+    echo "N3 URL: $N3_URL"; \
+    if [ -n "$N3_URL" ]; then \
+        wget -qO /tmp/n3.tgz "$N3_URL" && \
+        mkdir -p /tmp/n3 && \
+        tar -xzf /tmp/n3.tgz -C /tmp/n3; \
+        find /tmp/n3 -type f -perm /111 -exec cp -v {} /opt/bin/ \;; \
+        rm -f /tmp/n3.tgz; \
+    fi;
 
-# Install uv for Python package management
-RUN pip install --no-cache-dir uv
+# shaka-packager (single binary asset)
+RUN set -eux; \
+    SH_URL=$(curl -s https://api.github.com/repos/shaka-project/shaka-packager/releases/latest \
+        | jq -r '.assets[] | select(.browser_download_url | test("packager-linux-x64")) | .browser_download_url' \
+        | head -n1); \
+    echo "SHAKA URL: $SH_URL"; \
+    if [ -n "$SH_URL" ]; then \
+        wget -qO /opt/bin/packager "$SH_URL" && chmod +x /opt/bin/packager; \
+    fi
 
-# Set working directory
-WORKDIR /app
+# hola-proxy (single binary asset)
+RUN set -eux; \
+    HOLA_URL=$(curl -s https://api.github.com/repos/Snawoot/hola-proxy/releases/latest \
+        | jq -r '.assets[] | select(.browser_download_url | test("linux-amd64")) | .browser_download_url' \
+        | head -n1); \
+    echo "HOLA URL: $HOLA_URL"; \
+    if [ -n "$HOLA_URL" ]; then \
+        wget -qO /opt/bin/hola-proxy "$HOLA_URL" && chmod +x /opt/bin/hola-proxy; \
+    fi
 
-# Clone the official unshackle repository
-RUN git clone --branch ${UNSHACKLE_BRANCH} ${UNSHACKLE_SOURCE} /app/unshackle-source
+# CCExtractor: ffmpeg wrapper for extracting CEA-608 closed captions
+COPY docker-files/ccextractor-wrapper.py /opt/bin/ccextractor-wrapper.py
+COPY docker-files/ccextractor /opt/bin/ccextractor
+RUN chmod +x /opt/bin/ccextractor
 
-# Copy the official source files
-RUN cp -r /app/unshackle-source/* /app/ && rm -rf /app/unshackle-source
+#
+# GPU driver dependencies (if selected)
+#
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
+    if grep -qi microsoft /proc/version; then \
+        echo "WSL2 detected: installing only user-space libraries"; \
+        apt-get update; \
+        for gpu in $GPUSUPPORT; do \
+            case "$gpu" in \
+                intel) apt-get install -y --no-install-recommends \
+                    libva2 libva-drm2 libva-x11-2 libdrm2 vainfo ;; \
+                nvidia) echo "WSL2: NVIDIA drivers managed by host, skipping toolkit install" ;; \
+                amd) apt-get install -y --no-install-recommends \
+                    mesa-vulkan-drivers ;; \
+            esac; \
+        done; \
+    else \
+        apt-get update; \
+        for gpu in $GPUSUPPORT; do \
+            case "$gpu" in \
+                intel) apt-get install -y --no-install-recommends \
+                    libva2 libva-drm2 libva-x11-2 libdrm2 vainfo \
+                    intel-media-va-driver-non-free i965-va-driver-shaders mesa-va-drivers \
+                    firmware-intel-graphics ;; \
+                nvidia) apt-get install -y --no-install-recommends \
+                    nvidia-driver nvidia-driver-libs nvidia-container-toolkit ;; \
+                amd) apt-get install -y --no-install-recommends \
+                    mesa-vulkan-drivers rocminfo firmware-amd-graphics ;; \
+            esac; \
+        done; \
+    fi
 
-
-# Install dependencies with uv
-RUN uv sync --frozen
-
-# Add a few runtime subtitle helpers that may not be present in the
-# upstream project's locked deps on some environments (subby + webvtt)
-RUN uv add isodate subby webvtt-py
-
-# Build the UI directly in this stage
-WORKDIR /tmp
-# Copy our fixed UI source instead of cloning
-RUN git clone --branch ${UI_BRANCH} ${UI_SOURCE} /tmp/unshackle-ui
-WORKDIR /tmp/unshackle-ui
-
-# Install UI dependencies
-RUN npm ci
-
-# Create production environment file with generated API key (Vite uses VITE_ prefix)
-RUN UNSHACKLE_API_KEY=$(openssl rand -hex 32) && \
-    echo "VITE_UNSHACKLE_API_URL=" > .env.production && \
-    echo "VITE_UNSHACKLE_API_KEY=$UNSHACKLE_API_KEY" >> .env.production && \
-    echo "VITE_TMDB_API_KEY=" >> .env.production && \
-    echo "VITE_TMDB_BASE_URL=https://api.themoviedb.org/3" >> .env.production && \
-    echo "VITE_TMDB_IMAGE_BASE=https://image.tmdb.org/t/p/w500" >> .env.production && \
-    echo "VITE_APP_ENV=production" >> .env.production && \
-    echo "VITE_LOG_LEVEL=error" >> .env.production && \
-    echo "VITE_DEBUG_API=false" >> .env.production && \
-    echo "TMDB_API_KEY=" >> .env.production && \
-    echo "UNSHACKLE_API_KEY=$UNSHACKLE_API_KEY" > /app/.env
-
-
-# Build the UI application (skip type checking due to upstream TypeScript issues)
-RUN npm run build --skip-type-check || npx vite build
-
-# Copy the built UI to nginx web root
-RUN mkdir -p /var/www/html && cp -r /tmp/unshackle-ui/dist/* /var/www/html/
-
-# Return to app directory
-WORKDIR /app
-
-# Create nginx configuration
-COPY <<EOF /etc/nginx/sites-available/default
-server {
-    listen 80;
-    server_name localhost;
-    root /var/www/html;
-    index index.html;
-
-    # Enable gzip compression
-    gzip on;
-    gzip_vary on;
-    gzip_min_length 1024;
-    gzip_proxied any;
-    gzip_types text/plain text/css text/xml text/javascript application/javascript application/json application/xml+rss application/atom+xml image/svg+xml;
-
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-    # API proxy - proxy /api/* requests to unshackle serve
-    location /api/ {
-        proxy_pass http://127.0.0.1:8888;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cache_bypass \$http_upgrade;
-        proxy_read_timeout 300;
-        proxy_connect_timeout 300;
-        proxy_send_timeout 300;
-    }
-
-    # Static files with long-term caching
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-        try_files \$uri =404;
-    }
-
-    # SPA fallback - serve index.html for all other routes
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-
-    # Error pages
-    error_page 404 /index.html;
-}
-
-# Transparent proxy server for API calls (listens on 8889, proxies to real API on 8888)
-server {
-    listen 8889;
-    server_name localhost;
-
-    # Proxy all requests to the real unshackle API
-    location / {
-        proxy_pass http://127.0.0.1:8888;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cache_bypass \$http_upgrade;
-        proxy_read_timeout 300;
-        proxy_connect_timeout 300;
-        proxy_send_timeout 300;
-
-        # WebSocket support
-        proxy_set_header Connection "upgrade";
-    }
-}
-EOF
-
-# Create supervisor configuration
-COPY <<EOF /etc/supervisor/conf.d/unshackle.conf
-[supervisord]
-nodaemon=true
-user=root
-logfile=/var/log/supervisor/supervisord.log
-pidfile=/var/run/supervisord.pid
-
-[program:nginx]
-command=nginx -g "daemon off;"
-autorestart=true
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-
-[program:unshackle-api]
-command=bash -c "source /app/.env && uv run unshackle serve --host 0.0.0.0 --port 8888 --no-key"
-directory=/app
-autorestart=true
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-user=root
-environment=HOME="/root",PATH="/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-EOF
-
-# Create directories for downloads and config
-RUN mkdir -p /app/downloads /app/config /var/log/supervisor
-
-# Create startup script
-COPY <<EOF /app/start.sh
-#!/bin/bash
-
-echo "=== Unshackle Docker Container Starting ==="
-echo "Unshackle Branch: ${UNSHACKLE_BRANCH}"
-echo "Container Built: $(date)"
-
-# Load the generated API key
-source /app/.env
-
-
-# Display environment info
-echo ""
-echo "=== Environment Information ==="
-echo "TMDB API Key: \$([ -n "\$TMDB_API_KEY" ] && echo "Set (\${TMDB_API_KEY:0:8}...)" || echo "Not set")"
-echo "Unshackle API Key: \$([ -n "\$UNSHACKLE_API_KEY" ] && echo "Set (\${UNSHACKLE_API_KEY:0:8}...)" || echo "Not set")"
-
-# Update the built UI with runtime environment variables if TMDB key is provided
-if [ -n "\$TMDB_API_KEY" ]; then
-    echo "Updating UI configuration with TMDB API key..."
-    # Replace the literal "$TMDB_API_KEY" placeholder in built JS files with the runtime key
-    find /var/www/html -name "*.js" -type f -exec sed -i "s/\\$TMDB_API_KEY/${TMDB_API_KEY}/g" {} \;
-    echo "TMDB API key injected into UI build files"
-fi
-
-echo "=== Starting Services ==="
-echo "Web UI: http://localhost (or your container's exposed port)"
-echo "API: http://localhost:8888"
-echo ""
-
-# Start supervisor which will manage nginx and unshackle
-exec supervisord -c /etc/supervisor/conf.d/unshackle.conf
-EOF
-
-# Convert line endings and make executable
-RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
 
 # Configure grc and create wrapper scripts for interactive and non-interactive use
 RUN set -eux; \
     if [ -f /etc/default/grc ]; then \
-        sed -ri 's/^GRC_ALIASES=.*/GRC_ALIASES=true/' /etc/default/grc || echo 'GRC_ALIASES=true' >> /etc/default/grc; \
-    fi; \
-    if [ -f /etc/profile.d/grc.sh ]; then ln -sf /etc/profile.d/grc.sh /etc/grc.sh || true; fi; \
-    # Create system-wide wrapper scripts so commands work in scripts and services
-    cat > /usr/local/bin/unshackle <<'SH' && chmod +x /usr/local/bin/unshackle; \
-#!/bin/sh
-exec uv run unshackle "$@"
-SH
-    cat > /usr/local/bin/dl <<'SH' && chmod +x /usr/local/bin/dl; \
-#!/bin/sh
-exec uv run unshackle dl "$@"
-SH
-    # Ensure docker exec interactive shells load grc by default for root
-    if [ -f /etc/profile.d/grc.sh ]; then \
-        grep -qxF '[[ -s "/etc/profile.d/grc.sh" ]] && source /etc/profile.d/grc.sh' /root/.bashrc || echo '[[ -s "/etc/profile.d/grc.sh" ]] && source /etc/profile.d/grc.sh' >> /root/.bashrc; \
-    fi || true
+        grep -q '^GRC_ALIASES=true' /etc/default/grc || \
+        sed -ri 's/^GRC_ALIASES=.*/GRC_ALIASES=true/' /etc/default/grc || \
+        echo 'GRC_ALIASES=true' >> /etc/default/grc; \
+    fi
+# Set the startup command and default interactive shell preferences
+# Use a single-quoted heredoc so nothing is expanded during build
+RUN set -eux; \
+    mkdir -p /root; \
+    cat > /root/.bashrc <<'BASHRC'
+PS1='\n${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 
-# Expose ports
+export LS_OPTIONS='--color=auto'
+eval "$(dircolors)"
+alias ls='ls $LS_OPTIONS'
+alias ll='ls $LS_OPTIONS -l'
+alias l='ls $LS_OPTIONS -lA'
+
+# Load grc if available
+[[ -s "/etc/profile.d/grc.sh" ]] && source /etc/profile.d/grc.sh
+
+# Show a fastfetch summary only for interactive shells and when fastfetch exists
+if [ -t 1 ] && command -v fastfetch >/dev/null 2>&1; then
+    fastfetch --logo /opt/logo.txt || true
+fi
+BASHRC
+RUN set -eux; cp /root/.bashrc /etc/skel/.bashrc || true
+
+
+COPY docker-files/subtitleedit-wrapper.py /opt/bin/subtitleedit-wrapper.py
+COPY docker-files/subtitleedit /opt/bin/subtitleedit
+COPY docker-files/unshackle /opt/bin/unshackle
+COPY docker-files/dl /opt/bin/dl
+COPY docker-files/start.sh /usr/local/bin/start.sh
+COPY docker-files/nginx-default.conf /etc/nginx/sites-available/default
+COPY docker-files/supervisor-unshackle.conf /etc/supervisor/conf.d/unshackle.conf
+COPY docker-files/supervisord.conf /etc/supervisord.conf
+COPY docker-files/healthcheck.sh /etc/healthcheck.sh
+COPY docker-files/logo.txt /opt/logo.txt
+COPY docker-files/check-gpu.sh /opt/bin/check-gpu.sh
+
+
+RUN set -eux; \
+    # normalize line endings for text files only (scripts), ensure executables are runnable, create symlinks
+    for f in /opt/bin/*; do \
+        [ -f "$f" ] || continue; \
+        chmod +x "$f" 2>/dev/null || true; \
+        # Only normalize line endings for text files (check for shebang or .py/.sh extension)
+        if head -n1 "$f" 2>/dev/null | grep -q '^#!'; then \
+            sed -i 's/\r$//' "$f" 2>/dev/null || true; \
+        elif echo "$f" | grep -qE '\.(py|sh|bash)$'; then \
+            sed -i 's/\r$//' "$f" 2>/dev/null || true; \
+        fi; \
+        ln -sf "$f" /usr/local/bin/$(basename "$f") || true; \
+        ln -sf "$f" /app/binaries/$(basename "$f") || true; \
+    done; \
+    # Symlink jellyfin-ffmpeg binaries to standard locations
+    ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg; \
+    ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe; \
+    ln -sf /usr/lib/jellyfin-ffmpeg/ffplay /usr/local/bin/ffplay; \
+    # Create capitalized SubtitleEdit symlink for Unshackle compatibility
+    ln -sf /opt/bin/subtitleedit /opt/bin/SubtitleEdit; \
+    ln -sf /opt/bin/SubtitleEdit /usr/local/bin/SubtitleEdit; \
+    ln -sf /opt/bin/SubtitleEdit /app/binaries/SubtitleEdit
+
+# All tools in /opt/bin (including Bento4) are already symlinked by the previous RUN command
+
+#
+# Unshackle CLI configuration
+#
+
+
+# Set working directory
+WORKDIR /app
+
+# Install uv and subtitle-related Python packages (use BuildKit pip cache)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir uv pysubs2 pycaption ffsubsync || true
+
+# Clone the official unshackle repository
+RUN git clone --branch ${UNSHACKLE_BRANCH} ${UNSHACKLE_SOURCE} /app/unshackle-source
+RUN cp -r /app/unshackle-source/* /app/ && rm -rf /app/unshackle-source
+
+# Install dependencies with uv
+RUN uv sync --frozen
+RUN uv add isodate subby webvtt-py
+
+# Verify unshackle installation
+RUN uv run unshackle env check || true
+
+#
+# Unshackle UI Build and Integration
+#
+# Install UI and UI Node dependencies so build tools like `tsc` and `vite` are available
+RUN git clone --branch ${UI_BRANCH} ${UI_SOURCE} /app/unshackle-ui;
+
+# Set up environment variables and build the UI
+RUN set -eux; \
+    UNSHACKLE_API_KEY=$(openssl rand -hex 32) && \
+    echo "# Unshackle API Configuration" > .env.production && \
+    echo "# Generated during Docker build" >> .env.production && \
+    echo "VITE_UNSHACKLE_API_URL==http://localhost:8888" > .env.production && \
+    echo "VITE_UNSHACKLE_API_KEY=$UNSHACKLE_API_KEY" >> .env.production && \
+    echo "UNSHACKLE_API_KEY=$UNSHACKLE_API_KEY" > /app/.env && \
+    echo "# TMDB API Configuration" >> .env.production && \
+    echo "TMDB_API_KEY=" >> /app/.env && \
+    echo "VITE_TMDB_API_KEY=" >> .env.production && \
+    echo "VITE_TMDB_BASE_URL=https://api.themoviedb.org/3" >> .env.production && \
+    echo "VITE_TMDB_IMAGE_BASE=https://image.tmdb.org/t/p/w500" >> .env.production && \
+    echo "# Application Configuration" >> .env.production && \
+    echo "VITE_APP_NAME=Unshackle UI" >> .env.production && \
+    echo "VITE_APP_ENV=production" >> .env.production && \
+    echo "# Development Configuration (optional)" >> .env.production && \
+    echo "VITE_DEBUG=false" >> .env.production && \
+    echo "VITE_LOG_LEVEL=error" >> .env.production && \
+    echo "VITE_DEBUG_API=false" >> .env.production;
+
+
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    set -eux; \
+    if [ -d /app/unshackle-ui ]; then \
+        cd /app/unshackle-ui; \
+        npm ci --include=dev --legacy-peer-deps || npm install --legacy-peer-deps || true; \
+        npm run build || { echo 'UI build failed, continuing without UI'; mkdir -p dist; }; \
+        mkdir -p /var/www/html /var/log/supervisor; \
+        if [ -d dist ] && [ "$(ls -A dist 2>/dev/null)" ]; then \
+            cp -r dist/* /var/www/html/; \
+        else \
+            echo '<h1>Unshackle UI build failed</h1><p>API available on port 8888</p>' > /var/www/html/index.html; \
+        fi; \
+    fi
+
+
+
+# Expose ports for Unshackle UI (80) and API (8888)
 EXPOSE 80 8888
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost/ && curl -f http://localhost:8888/ || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD /etc/healthcheck.sh
 
-# Set the startup command
-CMD ["bash", "/app/start.sh"]
+
+CMD ["bash", "/usr/local/bin/start.sh"]

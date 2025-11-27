@@ -263,6 +263,7 @@ RUN set -eux; \
     cat > /root/.bashrc <<'BASHRC'
 PS1='\n${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 
+export SHELL=/bin/bash
 export LS_OPTIONS='--color=auto'
 eval "$(dircolors)"
 alias ls='ls $LS_OPTIONS'
@@ -277,7 +278,7 @@ if [ -t 1 ] && command -v fastfetch >/dev/null 2>&1; then
     fastfetch --logo /opt/logo.txt || true
 fi
 BASHRC
-RUN set -eux; cp /root/.bashrc /etc/skel/.bashrc || true
+RUN set -eux; sed -i 's/\r$//' /root/.bashrc; cp /root/.bashrc /etc/skel/.bashrc || true
 
 
 COPY docker-files/subtitleedit-wrapper.py /opt/bin/subtitleedit-wrapper.py

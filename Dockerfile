@@ -261,9 +261,15 @@ RUN set -eux; \
 RUN set -eux; \
     mkdir -p /root; \
     cat > /root/.bashrc <<'BASHRC'
-PS1='\n${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+# Extract project name and version from pyproject.toml for prompt
+if [ -f /app/pyproject.toml ]; then
+    PROJECT_NAME=$(grep '^name = ' /app/pyproject.toml | sed 's/name = "\(.*\)"/\1/' 2>/dev/null || echo "unshackle")
+    PROJECT_VERSION=$(grep '^version = ' /app/pyproject.toml | sed 's/version = "\(.*\)"/\1/' 2>/dev/null || echo "unknown")
+    PS1='\n${debian_chroot:+($debian_chroot)}\[\033[01;32m\]'"$PROJECT_NAME"' (\[\033[01;33m\]'"$PROJECT_VERSION"'\[\033[01;32m\])\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+else
+    PS1='\n${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+fi
 
-export SHELL=/bin/bash
 export LS_OPTIONS='--color=auto'
 eval "$(dircolors)"
 alias ls='ls $LS_OPTIONS'
@@ -292,6 +298,7 @@ COPY docker-files/supervisord.conf /etc/supervisord.conf
 COPY docker-files/healthcheck.sh /etc/healthcheck.sh
 COPY docker-files/logo.txt /opt/logo.txt
 COPY docker-files/check-gpu.sh /opt/bin/check-gpu.sh
+COPY docker-files/unshackle-update.sh /opt/bin/unshackle-update.sh
 
 
 RUN set -eux; \
@@ -331,9 +338,8 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir uv pysubs2 pycaption ffsubsync || true
 
-# Clone the official unshackle repository
-RUN git clone --branch ${UNSHACKLE_BRANCH} ${UNSHACKLE_SOURCE} /app/unshackle-source
-RUN cp -r /app/unshackle-source/* /app/ && rm -rf /app/unshackle-source
+# Download Unshackle using update script (skip UI build for now)
+RUN SKIP_UI_BUILD=true /opt/bin/unshackle-update.sh
 
 # Install dependencies with uv
 RUN uv sync --frozen
@@ -345,44 +351,31 @@ RUN uv run unshackle env check || true
 #
 # Unshackle UI Build and Integration
 #
-# Install UI and UI Node dependencies so build tools like `tsc` and `vite` are available
-RUN git clone --branch ${UI_BRANCH} ${UI_SOURCE} /app/unshackle-ui;
-
-# Set up environment variables and build the UI
+# Set up environment variables for UI (before running update script)
 RUN set -eux; \
     UNSHACKLE_API_KEY=$(openssl rand -hex 32) && \
-    echo "# Unshackle API Configuration" > .env.production && \
-    echo "# Generated during Docker build" >> .env.production && \
-    echo "VITE_UNSHACKLE_API_URL==http://localhost:8888" > .env.production && \
-    echo "VITE_UNSHACKLE_API_KEY=$UNSHACKLE_API_KEY" >> .env.production && \
+    mkdir -p /app/unshackle-ui && \
+    echo "# Unshackle API Configuration" > /app/unshackle-ui/.env.production && \
+    echo "# Generated during Docker build" >> /app/unshackle-ui/.env.production && \
+    echo "VITE_UNSHACKLE_API_URL==http://localhost:8888" >> /app/unshackle-ui/.env.production && \
+    echo "VITE_UNSHACKLE_API_KEY=$UNSHACKLE_API_KEY" >> /app/unshackle-ui/.env.production && \
     echo "UNSHACKLE_API_KEY=$UNSHACKLE_API_KEY" > /app/.env && \
-    echo "# TMDB API Configuration" >> .env.production && \
+    echo "# TMDB API Configuration" >> /app/.env && \
     echo "TMDB_API_KEY=" >> /app/.env && \
-    echo "VITE_TMDB_API_KEY=" >> .env.production && \
-    echo "VITE_TMDB_BASE_URL=https://api.themoviedb.org/3" >> .env.production && \
-    echo "VITE_TMDB_IMAGE_BASE=https://image.tmdb.org/t/p/w500" >> .env.production && \
-    echo "# Application Configuration" >> .env.production && \
-    echo "VITE_APP_NAME=Unshackle UI" >> .env.production && \
-    echo "VITE_APP_ENV=production" >> .env.production && \
-    echo "# Development Configuration (optional)" >> .env.production && \
-    echo "VITE_DEBUG=false" >> .env.production && \
-    echo "VITE_LOG_LEVEL=error" >> .env.production && \
-    echo "VITE_DEBUG_API=false" >> .env.production;
+    echo "VITE_TMDB_API_KEY=" >> /app/unshackle-ui/.env.production && \
+    echo "VITE_TMDB_BASE_URL=https://api.themoviedb.org/3" >> /app/unshackle-ui/.env.production && \
+    echo "VITE_TMDB_IMAGE_BASE=https://image.tmdb.org/t/p/w500" >> /app/unshackle-ui/.env.production && \
+    echo "# Application Configuration" >> /app/unshackle-ui/.env.production && \
+    echo "VITE_APP_NAME=Unshackle UI" >> /app/unshackle-ui/.env.production && \
+    echo "VITE_APP_ENV=production" >> /app/unshackle-ui/.env.production && \
+    echo "# Development Configuration (optional)" >> /app/unshackle-ui/.env.production && \
+    echo "VITE_DEBUG=false" >> /app/unshackle-ui/.env.production && \
+    echo "VITE_LOG_LEVEL=error" >> /app/unshackle-ui/.env.production && \
+    echo "VITE_DEBUG_API=false" >> /app/unshackle-ui/.env.production
 
-
+# Run update script to download UI and build it
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
-    set -eux; \
-    if [ -d /app/unshackle-ui ]; then \
-        cd /app/unshackle-ui; \
-        npm ci --include=dev --legacy-peer-deps || npm install --legacy-peer-deps || true; \
-        npm run build || { echo 'UI build failed, continuing without UI'; mkdir -p dist; }; \
-        mkdir -p /var/www/html /var/log/supervisor; \
-        if [ -d dist ] && [ "$(ls -A dist 2>/dev/null)" ]; then \
-            cp -r dist/* /var/www/html/; \
-        else \
-            echo '<h1>Unshackle UI build failed</h1><p>API available on port 8888</p>' > /var/www/html/index.html; \
-        fi; \
-    fi
+    /opt/bin/unshackle-update.sh
 
 
 

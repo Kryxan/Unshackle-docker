@@ -23,11 +23,17 @@ This repository contains a comprehensive Dockerfile to build an Unshackle image 
 >
 > *Source: [unshackle-dl/unshackle](https://github.com/unshackle-dl/unshackle)*
 
-**UI Status:** The Unshackle UI should now work, at least it won't prevent a build. This Dockerfile uses a modified fork ([Kryxan/unshackle-ui](https://github.com/Kryxan/unshackle-ui)) that includes fixes for TypeScript strict mode and improved compatibility. The TMDB search functionality works when configured with a valid API key.
+**UI Status:** ✅ The Unshackle UI is fully functional! This Dockerfile uses a modified fork ([Kryxan/unshackle-ui](https://github.com/Kryxan/unshackle-ui)) that includes:
+- Fixed TypeScript strict mode compilation errors
+- Working TMDB search functionality (requires API key configuration)
+- Integrated web-based terminal with full PTY support
+- Improved compatibility and stability
 
 ## Features
 
 - **Complete Media Toolkit**: Pre-installed Bento4, dovi_tool, hdr10plus_tool, N_m3u8DL-RE, shaka-packager, and more
+- **Working Web UI**: Fully functional UI with TMDB search, download management, and integrated terminal
+- **Web Terminal**: Browser-based terminal with xterm.js providing full interactive shell access
 - **Multi-GPU Support**: Automatic detection and configuration for Intel, NVIDIA, and AMD GPUs
 - **WSL2 Aware**: Automatically adapts GPU driver installation for WSL2 environments
 - **Optimized Build**: Uses BuildKit cache mounts for faster iterative builds
@@ -287,7 +293,8 @@ docker exec unshackle ffmpeg -codecs | grep -E "(vaapi|nvenc|qsv)"
 
 **Web UI:** `http://localhost:8080`  
 **API:** `http://localhost:8888/api/`  
-**API Documentation:** `http://localhost:8888/api/docs/`
+**API Documentation:** `http://localhost:8888/api/docs/`  
+**Web Terminal:** Integrated in UI (requires WebSocket support)
 
 ### Web UI Configuration
 
@@ -301,6 +308,12 @@ On first launch, configure the UI via Settings page (`http://localhost:8080`):
    - Get your free API key at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api)
    - Enter the key in Settings → TMDB API Key
    - Search functionality requires this to be configured
+
+3. **Web Terminal:**
+   - Access via Terminal tab in UI
+   - Provides full interactive bash shell with PTY support
+   - Terminal resize supported
+   - Loads `.bashrc` with aliases and fastfetch banner
 
 **Interactive shell:**
 
@@ -330,6 +343,7 @@ docker exec unshackle dl https://example.com/video.mpd
 **Common Issues:**
 
 - **UI search not working:** Configure TMDB API key in Settings page
+- **Terminal not loading:** Ensure WebSocket support is enabled in your browser/proxy
 - **Container not accessible:** Check port bindings (8080 for UI, 8888 for API)
 - **GPU not detected in WSL2:** This is normal - Windows manages GPU drivers in WSL2
 - **Tool detection shows 15/16:** FFplay is missing from jellyfin-ffmpeg7 but is optional

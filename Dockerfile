@@ -270,6 +270,7 @@ else
     PS1='\n${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 fi
 
+export SHELL=/bin/bash
 export LS_OPTIONS='--color=auto'
 eval "$(dircolors)"
 alias ls='ls $LS_OPTIONS'
@@ -324,7 +325,6 @@ RUN set -eux; \
     ln -sf /opt/bin/SubtitleEdit /usr/local/bin/SubtitleEdit; \
     ln -sf /opt/bin/SubtitleEdit /app/binaries/SubtitleEdit
 
-# All tools in /opt/bin (including Bento4) are already symlinked by the previous RUN command
 
 #
 # Unshackle CLI configuration

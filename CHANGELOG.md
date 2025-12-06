@@ -54,6 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added terminal configuration and troubleshooting sections
 - Enhanced Web UI access documentation with WebSocket information
 
+## [1.0.2] - 2025-12-05
+
+### Added
+
+- **StabbedByBrick Services**: Added StabbedByBrick's collection of non-premium services for Unshackle (https://github.com/stabbedbybrick/services). These services are included as part of the update process and can be selectively applied by the administrator via the `unshackle-update.sh` script to avoid overwriting custom local service modifications.
+
+
 ## [1.0.0] - 2025-11-27
 
 ### Added

@@ -8,6 +8,8 @@ UNSHACKLE_BRANCH="${UNSHACKLE_BRANCH:-main}"
 UNSHACKLE_SOURCE="${UNSHACKLE_SOURCE:-https://github.com/unshackle-dl/unshackle}"
 UI_BRANCH="${UI_BRANCH:-main}"
 UI_SOURCE="${UI_SOURCE:-https://github.com/Kryxan/unshackle-ui}"
+SERVICES_BRANCH="${SERVICES_BRANCH:-main}"
+SERVICES_SOURCE="${SERVICES_SOURCE:-https://github.com/stabbedbybrick/services}"
 
 WORK_DIR="/tmp/unshackle-updates"
 APP_DIR="/app"
@@ -134,6 +136,56 @@ if [ "$SKIP_UI_BUILD" != "true" ]; then
     cd "$APP_DIR"
 else
     echo "Skipping UI build (SKIP_UI_BUILD=true)"
+fi
+
+
+# Download Services
+echo ""
+echo "Downloading Services from $SERVICES_SOURCE (branch: $SERVICES_BRANCH)..."
+if [ -d "$WORK_DIR/services" ]; then
+    rm -rf "$WORK_DIR/services"
+fi
+
+git clone --depth 1 --branch "$SERVICES_BRANCH" "$SERVICES_SOURCE" "$WORK_DIR/services" || {
+    echo "ERROR: Failed to clone Services repository"
+    exit 1
+}
+
+rm -rf "$APP_DIR/unshackle/services/EXAMPLE"
+
+# Check for differences and prompt user
+echo ""
+echo "Updating Services files..."
+if [ -d "$APP_DIR/unshackle/services" ]; then
+    DIFFERING_SERVICES=""
+    for service_dir in "$WORK_DIR/services/services"/*/; do
+        service_name=$(basename "$service_dir")
+        if [ -d "$APP_DIR/unshackle/services/$service_name" ]; then
+            if ! diff -r "$service_dir" "$APP_DIR/unshackle/services/$service_name" >/dev/null 2>&1; then
+                DIFFERING_SERVICES="$DIFFERING_SERVICES $service_name"
+            fi
+        fi
+    done
+    if [ -n "$DIFFERING_SERVICES" ]; then
+        echo "Downloaded StabbedByBrick's Services. On examination, the following services differ from local branch:"
+        echo "$DIFFERING_SERVICES"
+        read -r -p "Proceed with full update? (y/n): " PROCEED
+        if [ "$PROCEED" = "y" ] || [ "$PROCEED" = "Y" ]; then
+            cp -r "$WORK_DIR/services/services" "$APP_DIR/unshackle/services"
+            echo "Services updated"
+        else
+            echo "Select which services to not update. Enter 'skip' for each differing service you want to keep local, or 'update' to update it."
+            for service in $DIFFERING_SERVICES; do
+                read -r -p "Update $service? (update/skip): " ACTION
+                if [ "$ACTION" = "update" ]; then
+                    cp -r "$WORK_DIR/services/services/$service" "$APP_DIR/unshackle/services/"
+                fi
+            done
+            echo "Services updated (selective)"
+        fi
+    else
+        echo "Services are already up to date."
+    fi
 fi
 
 # Clean up

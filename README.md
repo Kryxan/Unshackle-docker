@@ -38,6 +38,7 @@ This repository contains a comprehensive Dockerfile to build an Unshackle image 
 - **WSL2 Aware**: Automatically adapts GPU driver installation for WSL2 environments
 - **Optimized Build**: Uses BuildKit cache mounts for faster iterative builds
 - **Wrapper Scripts**: CCExtractor and SubtitleEdit wrappers for seamless integration
+ - **Included Services**: This build now includes StabbedByBrick's collection of non-premium Unshackle services (https://github.com/stabbedbybrick/services). The `unshackle-update.sh` script can apply these services; it also supports selective updates to avoid overwriting local customizations.
 
 
 ## Build Arguments
